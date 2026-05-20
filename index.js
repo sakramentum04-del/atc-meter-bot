@@ -1,360 +1,318 @@
+const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
-const axios = require('axios');
 
-const app = express();
-const TOKEN = '8867456785:AAEkO0csRdzfR5TlheLPRTEQKyquhRlGKs8';
-const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
+// Токен бота
+const token = '8867456785:AAEkO0csRdzfR5TlheLPRTEQKyquhRlGKs8';
+
+// URL Google Apps Script
 const GAS_URL = 'https://script.google.com/macros/s/AKfycby0Wr4Ydd01nQot6ZDCC7hBiLTBLUYQWZeCHPoq-1mPlm2K0wSc0HlRG3g30ARNfzsF6A/exec';
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Создаём бота
+const bot = new TelegramBot(token, { polling: true });
 
-// Состояния пользователей
-const userState = {};
+// Хранилище сессий пользователей
+const userSessions = new Map();
 
-// Текст с описанием шага
-function getStepText(stepData) {
-  let text = `🔹 *Шаг ${stepData.step}*️⃣\n\n`;
-  text += `🏠 *${stepData.place}*\n`;
-  text += `🔢 Счетчик: ${stepData.meterNumber || 'не указан'}\n`;
-  if (stepData.reading) {
-    text += `📊 Прошлые показания: ${stepData.reading}\n`;
+// ============================================
+// ФУНКЦИЯ ОТПРАВКИ В GOOGLE SHEETS
+// ============================================
+async function sendToSheet(step, reading, photoUrl) {
+  
+  // Заменяем точку на запятую на всякий случай
+  let fixedReading = String(reading).replace('.', ',');
+  
+  const data = {
+    step: step,
+    reading: fixedReading,
+    photoUrl: photoUrl || ''
+  };
+  
+  try {
+    const response = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    
+    const result = await response.json();
+    console.log('✅ Ответ от GAS:', JSON.stringify(result));
+    return result;
+    
+  } catch (error) {
+    console.error('❌ Ошибка отправки в GAS:', error);
+    return { success: false, error: error.message };
   }
-  text += `\n📸 Отправьте фото счетчика`;
-  return text;
 }
 
-app.post('/webhook', async (req, res) => {
-  const message = req.body.message;
-  if (!message) {
-    res.sendStatus(200);
-    return;
+// ============================================
+// ФУНКЦИЯ ПОЛУЧЕНИЯ ДАННЫХ ИЗ GOOGLE SHEETS
+// ============================================
+async function getFromSheet(action = 'list') {
+  try {
+    const response = await fetch(`${GAS_URL}?action=${action}`);
+    const result = await response.json();
+    return result;
+  } catch (error) {
+    console.error('❌ Ошибка получения данных:', error);
+    return { success: false, error: error.message };
   }
+}
+
+// ============================================
+// КОМАНДА /start
+// ============================================
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
   
-  const chatId = message.chat.id;
-  const text = message.text ? message.text.trim() : '';
-  const hasPhoto = message.photo && message.photo.length > 0;
-  
-  // --- КОМАНДА /start ---
-  if (text === '/start') {
-    const keyboard = {
+  // Приветственное сообщение
+  await bot.sendMessage(chatId, 
+    '👋 *Привет! Я бот для учёта показаний счётчиков*\n\n' +
+    '📋 *Доступные команды:*\n' +
+    '/start - Показать это меню\n' +
+    '/list - Показать все точки маршрута\n' +
+    '/step N - Показать информацию о шаге N (1-38)\n' +
+    '/set N ПОКАЗАНИЯ - Записать показания для шага N\n\n' +
+    '📸 *Как работать:*\n' +
+    '1️⃣ Нажми "Начать обход" ниже\n' +
+    '2️⃣ Сфотографируй счётчик\n' +
+    '3️⃣ Введи показания через запятую\n\n' +
+    '⚠️ *Важно:* Показания вводи через ЗАПЯТУЮ, а не точку!\n' +
+    '✅ Пример: 150,5\n' +
+    '❌ Неправильно: 150.5',
+    {
+      parse_mode: 'Markdown',
       reply_markup: {
         keyboard: [
-          [{ text: '🏁 Начать обход' }]
+          ['📋 Начать обход']
         ],
         resize_keyboard: true,
         one_time_keyboard: false
       }
-    };
-    
-    await sendMessage(chatId, 
-      '👋 *Привет!* Я бот для учета показаний счетчиков.\n\n' +
-      'Нажми кнопку **"🏁 Начать обход"**, чтобы начать заполнение маршрута.',
-      keyboard
-    );
-    res.sendStatus(200);
-    return;
-  }
+    }
+  );
+});
+
+// ============================================
+// КОМАНДА /list
+// ============================================
+bot.onText(/\/list/, async (msg) => {
+  const chatId = msg.chat.id;
   
-  // --- КОМАНДА "Начать обход" ---
-  if (text === '🏁 Начать обход') {
-    // Загружаем список точек
-    try {
-      const response = await axios.post(GAS_URL, { action: 'getList' });
-      const data = response.data;
+  const result = await getFromSheet('list');
+  
+  if (result.success && result.data) {
+    let message = '📋 *Все точки маршрута:*\n\n';
+    
+    result.data.forEach((row, index) => {
+      const step = index + 1;
+      const room = row[1] || 'Не указано';
+      const meter = row[2] || 'Не указан';
+      const reading = row[3] || '❌ Не записано';
       
-      if (data.success) {
-        userState[chatId] = {
-          currentStep: 0,
-          stepsData: data.data,
-          completedSteps: {},
-          skippedSteps: {}
-        };
-        
-        await sendMessage(chatId, '✅ Начинаем обход!');
-        await sendCurrentStep(chatId);
-      } else {
-        await sendMessage(chatId, '❌ Ошибка загрузки данных');
-      }
-    } catch (error) {
-      await sendMessage(chatId, '❌ Ошибка связи с таблицей');
-    }
-    res.sendStatus(200);
-    return;
+      message += `*Шаг ${step}:* ${room}\n`;
+      message += `Счётчик: ${meter}\n`;
+      message += `Показания: ${reading}\n\n`;
+    });
+    
+    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+  } else {
+    await bot.sendMessage(chatId, '❌ Ошибка получения данных');
+  }
+});
+
+// ============================================
+// КОМАНДА /step N
+// ============================================
+bot.onText(/\/step (\d+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const stepNum = parseInt(match[1]);
+  
+  if (stepNum < 1 || stepNum > 38) {
+    return bot.sendMessage(chatId, '❌ Шаг должен быть от 1 до 38');
   }
   
-  // --- ЭЛЕКТРИК В РЕЖИМЕ ОБХОДА ---
-  if (userState[chatId] && userState[chatId].currentStep !== undefined) {
-    const state = userState[chatId];
-    const stepIndex = state.currentStep;
-    const currentStepData = state.stepsData[stepIndex];
+  const result = await getFromSheet('step_' + stepNum);
+  
+  if (result.success && result.data) {
+    const row = result.data;
+    const message = 
+      `📍 *Шаг ${stepNum}*\n\n` +
+      `🏠 Помещение: ${row[1] || 'Не указано'}\n` +
+      `🔢 № счётчика: ${row[2] || 'Не указан'}\n` +
+      `📊 Показания: ${row[3] || '❌ Не записано'}\n` +
+      `📸 Фото: ${row[4] ? '✅ Есть' : '❌ Нет'}`;
     
-    if (!currentStepData) {
-      // Все шаги пройдены
-      await finishWalkthrough(chatId);
-      res.sendStatus(200);
-      return;
+    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+  } else {
+    await bot.sendMessage(chatId, '❌ Ошибка получения данных');
+  }
+});
+
+// ============================================
+// КОМАНДА /set N ПОКАЗАНИЯ
+// ============================================
+bot.onText(/\/set (\d+) (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const stepNum = parseInt(match[1]);
+  const reading = match[2].trim();
+  
+  if (stepNum < 1 || stepNum > 38) {
+    return bot.sendMessage(chatId, '❌ Шаг должен быть от 1 до 38');
+  }
+  
+  // 🚫 ПРОВЕРКА НА ТОЧКУ
+  if (reading.includes('.')) {
+    return bot.sendMessage(chatId, 
+      '❌ *Ошибка:* Используйте ЗАПЯТУЮ, а не точку!\n\n' +
+      '✅ Пример: 150,5\n' +
+      '❌ Неправильно: 150.5',
+      { parse_mode: 'Markdown' }
+    );
+  }
+  
+  const result = await sendToSheet(stepNum, reading, '');
+  
+  if (result.success) {
+    await bot.sendMessage(chatId, `✅ Шаг ${stepNum}: показания ${reading} записаны!`);
+  } else {
+    await bot.sendMessage(chatId, '❌ Ошибка записи в таблицу');
+  }
+});
+
+// ============================================
+// ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ (не команд)
+// ============================================
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+  
+  // Пропускаем команды
+  if (text && text.startsWith('/')) return;
+  
+  // --- КНОПКА "Начать обход" ---
+  if (text === '📋 Начать обход') {
+    
+    // Создаём сессию для пользователя
+    userSessions.set(chatId, {
+      currentStep: 1,
+      lastPhotoUrl: null
+    });
+    
+    return bot.sendMessage(chatId, 
+      '✅ *Начинаем обход!*\n\n' +
+      '📍 Шаг 1 из 38\n\n' +
+      '1️⃣ Сфотографируй счётчик\n' +
+      '2️⃣ Отправь фото\n' +
+      '3️⃣ После фото введи показания через ЗАПЯТУЮ\n\n' +
+      '⚠️ Не используй точку!',
+      { parse_mode: 'Markdown' }
+    );
+  }
+  
+  // Проверяем, есть ли активная сессия
+  const userData = userSessions.get(chatId);
+  if (!userData || !userData.currentStep) return;
+  
+  // Если это ввод показаний (после фото)
+  if (userData.waitingForReading) {
+    
+    // 🚫 ПРОВЕРКА НА ТОЧКУ
+    if (text.includes('.')) {
+      return bot.sendMessage(chatId, 
+        '❌ *Ошибка:* Введите показания через ЗАПЯТУЮ!\n\n' +
+        '✅ Пример: 150,5\n' +
+        '❌ Неправильно: 150.5\n\n' +
+        'Попробуйте ещё раз:',
+        { parse_mode: 'Markdown' }
+      );
     }
     
-    // Если ждем фото
-    if (state.waitingFor === 'photo') {
-      if (hasPhoto) {
-        // Получаем file_id фото
-        const photoId = message.photo[message.photo.length - 1].file_id;
-        state.lastPhoto = photoId;
-        state.waitingFor = 'reading';
+    const reading = text.trim();
+    const step = userData.currentStep;
+    
+    // Отправляем в GAS
+    const result = await sendToSheet(step, reading, userData.lastPhotoUrl);
+    
+    if (result.success) {
+      await bot.sendMessage(chatId, `✅ *Шаг ${step}:* ${reading} — записано!`, { parse_mode: 'Markdown' });
+      
+      // Переход к следующему шагу
+      if (step < 38) {
+        userData.currentStep = step + 1;
+        userData.waitingForReading = false;
+        userData.lastPhotoUrl = null;
         
-        // Убираем клавиатуру, пока не нужно
-        await sendMessage(chatId, 
-          `✅ Фото получено!\n\n📝 Теперь введите показания для шага *${currentStepData.step}* (${currentStepData.place}):\n\nПример: 125.6`,
-          { reply_markup: { remove_keyboard: true } }
+        return bot.sendMessage(chatId, 
+          `📍 *Шаг ${step + 1} из 38*\n\n` +
+          'Сфотографируй счётчик и отправь фото',
+          { parse_mode: 'Markdown' }
         );
       } else {
-        // Если текстом ответил, но не фото
-        if (text === '⏭ Пропустить шаг') {
-          state.skippedSteps[stepIndex] = true;
-          state.currentStep++;
-          state.waitingFor = 'photo';
-          await sendMessage(chatId, `⏭ Шаг ${currentStepData.step} пропущен`);
-          await sendCurrentStep(chatId);
-        } else {
-          await sendMessage(chatId, `📸 Пожалуйста, отправьте фото счетчика для шага *${currentStepData.step}*`);
-        }
+        // Завершение обхода
+        userSessions.delete(chatId);
+        return bot.sendMessage(chatId, 
+          '🎉 *Обход завершён!*\n\n' +
+          'Все 38 шагов записаны.\n' +
+          'Спасибо за работу!',
+          { parse_mode: 'Markdown' }
+        );
       }
-      res.sendStatus(200);
-      return;
-    }
-    
-    // Если ждем показания
-    if (state.waitingFor === 'reading') {
-      const reading = text;
-      
-      if (reading && !isNaN(parseFloat(reading))) {
-        // Получаем ссылку на фото через Telegram API
-        let photoUrl = '';
-        if (state.lastPhoto) {
-          try {
-            const fileResponse = await axios.get(`${TELEGRAM_API}/getFile?file_id=${state.lastPhoto}`);
-            if (fileResponse.data.ok) {
-              photoUrl = `https://api.telegram.org/file/bot${TOKEN}/${fileResponse.data.result.file_path}`;
-            }
-          } catch (e) {
-            console.error('Error getting photo URL:', e);
-          }
-        }
-        
-        // Сохраняем в таблицу
-        try {
-          const saveResponse = await axios.post(GAS_URL, {
-            action: 'setReading',
-            step: currentStepData.step,
-            reading: reading,
-            photoUrl: photoUrl
-          });
-          
-          if (saveResponse.data.success) {
-            state.completedSteps[stepIndex] = {
-              step: currentStepData.step,
-              reading: reading,
-              photoUrl: photoUrl
-            };
-            
-            state.currentStep++;
-            state.waitingFor = 'photo';
-            state.lastPhoto = null;
-            
-            await sendMessage(chatId, `✅ *Шаг ${currentStepData.step}*: показания ${reading} сохранены!`);
-            
-            // Переходим к следующему шагу
-            if (state.currentStep < state.stepsData.length) {
-              await sendCurrentStep(chatId);
-            } else {
-              await finishWalkthrough(chatId);
-            }
-          } else {
-            await sendMessage(chatId, `❌ Ошибка сохранения: ${saveResponse.data.message}`);
-          }
-        } catch (error) {
-          await sendMessage(chatId, '❌ Ошибка связи с таблицей при сохранении');
-        }
-      } else {
-        await sendMessage(chatId, `❌ Введите число. Например: 125.6`);
-      }
-      res.sendStatus(200);
-      return;
+    } else {
+      return bot.sendMessage(chatId, '❌ Ошибка записи. Попробуйте ещё раз:');
     }
   }
-  
-  // Обработка других команд
-  if (text === '/help') {
-    await sendMessage(chatId, 
-      '📋 *Команды:*\n\n' +
-      '/start - начать\n' +
-      '🏁 Начать обход - пошаговый режим\n' +
-      '/list - список всех точек\n' +
-      '/step N - показать точку N\n' +
-      '/set N ПОКАЗАНИЯ - записать показания'
-    );
-  } else if (text === '/list') {
-    try {
-      const response = await axios.post(GAS_URL, { action: 'getList' });
-      const data = response.data;
-      if (data.success) {
-        let msg = '📋 Список точек:\n\n';
-        data.data.forEach(item => {
-          const reading = item.reading ? `📊 ${item.reading}` : '❌';
-          msg += `🔹 *${item.step}*. ${item.place} — ${reading}\n`;
-        });
-        await sendMessage(chatId, msg);
-      }
-    } catch (error) {
-      await sendMessage(chatId, '❌ Ошибка');
-    }
-  } else if (text.startsWith('/step ')) {
-    const step = parseInt(text.split(' ')[1]);
-    if (!isNaN(step) && step >= 1 && step <= 38) {
-      try {
-        const response = await axios.post(GAS_URL, { action: 'getList' });
-        const data = response.data;
-        if (data.success) {
-          const item = data.data.find(i => i.step == step);
-          if (item) {
-            await sendMessage(chatId,
-              `🔹 *Шаг ${item.step}*\n🏠 ${item.place}\n🔢 Счетчик: ${item.meterNumber || 'не указан'}\n📊 Показания: ${item.reading || 'нет данных'}`
-            );
-          }
-        }
-      } catch (error) {
-        await sendMessage(chatId, '❌ Ошибка');
-      }
-    }
-  } else if (text.startsWith('/set ')) {
-    const parts = text.split(' ');
-    const step = parseInt(parts[1]);
-    const reading = parts.slice(2).join(' ');
-    if (!isNaN(step) && reading) {
-      try {
-        const response = await axios.post(GAS_URL, { action: 'setReading', step: step, reading: reading, photoUrl: '' });
-        if (response.data.success) {
-          await sendMessage(chatId, `✅ ${response.data.message}`);
-        } else {
-          await sendMessage(chatId, `❌ ${response.data.message}`);
-        }
-      } catch (error) {
-        await sendMessage(chatId, '❌ Ошибка');
-      }
-    }
-  } else {
-    await sendMessage(chatId, '❌ Неизвестная команда. Используй /start');
-  }
-  
-  res.sendStatus(200);
 });
 
-// Отправка текущего шага
-async function sendCurrentStep(chatId) {
-  const state = userState[chatId];
-  const stepData = state.stepsData[state.currentStep];
+// ============================================
+// ОБРАБОТКА ФОТОГРАФИЙ
+// ============================================
+bot.on('photo', async (msg) => {
+  const chatId = msg.chat.id;
+  const userData = userSessions.get(chatId);
   
-  if (!stepData) {
-    await finishWalkthrough(chatId);
-    return;
+  if (!userData || !userData.currentStep) {
+    return bot.sendMessage(chatId, 'Сначала нажми "📋 Начать обход"');
   }
   
-  const keyboard = {
-    reply_markup: {
-      keyboard: [
-        [{ text: '⏭ Пропустить шаг' }]
-      ],
-      resize_keyboard: true,
-      one_time_keyboard: false
-    }
-  };
+  // Получаем ID фото
+  const photoId = msg.photo[msg.photo.length - 1].file_id;
   
-  state.waitingFor = 'photo';
+  // Получаем ссылку на фото
+  const fileLink = await bot.getFileLink(photoId);
   
-  let text = `📍 *Шаг ${stepData.step}* из 38\n\n`;
-  text += `🏠 *${stepData.place}*\n`;
-  text += `🔢 Счетчик: ${stepData.meterNumber || 'не указан'}\n`;
-  if (stepData.reading) {
-    text += `📊 Прошлые показания: ${stepData.reading}\n`;
-  }
-  text += `\n📸 Отправьте фото счетчика`;
+  // Сохраняем ссылку в сессию
+  userData.lastPhotoUrl = fileLink;
+  userData.waitingForReading = true;
   
-  await sendMessage(chatId, text, keyboard);
-}
+  await bot.sendMessage(chatId, 
+    `✅ Фото получено!\n\n` +
+    `Теперь введи показания для шага ${userData.currentStep}\n` +
+    `⚠️ Через ЗАПЯТУЮ, пример: 150,5`
+  );
+});
 
-// Завершение обхода
-async function finishWalkthrough(chatId) {
-  const state = userState[chatId];
-  const totalSteps = state.stepsData.length;
-  const completedCount = Object.keys(state.completedSteps).length;
-  const skippedCount = Object.keys(state.skippedSteps).length;
-  const remainingCount = totalSteps - completedCount - skippedCount;
-  
-  let text = `🏁 *Обход маршрута завершен!*\n\n`;
-  text += `📊 Статистика:\n`;
-  text += `✅ Заполнено: ${completedCount} из ${totalSteps}\n`;
-  text += `⏭ Пропущено: ${skippedCount}\n`;
-  text += `❌ Осталось: ${remainingCount}\n\n`;
-  
-  if (remainingCount > 0) {
-    text += `⚠️ *ВНИМАНИЕ!* Остались незаполненные шаги!\n`;
-    // Список незаполненных
-    let missing = [];
-    for (let i = 0; i < totalSteps; i++) {
-      if (!state.completedSteps[i] && !state.skippedSteps[i]) {
-        missing.push(state.stepsData[i].step);
-      }
-    }
-    if (missing.length > 0) {
-      text += `Номера шагов: ${missing.join(', ')}\n\n`;
-    }
-    text += `⚠️ *Пожалуйста, проверьте и заполните их!*`;
-  } else {
-    text += `🎉 *Все показания успешно внесены!*`;
-  }
-  
-  const keyboard = {
-    reply_markup: {
-      keyboard: [
-        [{ text: '🏁 Начать обход' }]
-      ],
-      resize_keyboard: true,
-      one_time_keyboard: false
-    }
-  };
-  
-  await sendMessage(chatId, text, keyboard);
-  
-  // Очищаем состояние
-  delete userState[chatId];
-}
-
-// Функция отправки сообщения с клавиатурой
-async function sendMessage(chatId, text, options = {}) {
-  try {
-    const payload = {
-      chat_id: chatId,
-      text: text,
-      parse_mode: 'Markdown'
-    };
-    
-    if (options.reply_markup) {
-      payload.reply_markup = options.reply_markup;
-    }
-    
-    await axios.post(`${TELEGRAM_API}/sendMessage`, payload);
-  } catch (err) {
-    console.error('Error sending message:', err.response?.data || err.message);
-  }
-}
+// ============================================
+// ЗАПУСК ВЕБ-СЕРВЕРА (для Render)
+// ============================================
+const app = express();
+const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.send('Bot is running!');
+  res.json({
+    status: 'ok',
+    bot: 'atc_meter_bot',
+    version: '1.0.0'
+  });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Bot server running on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`🚀 Бот запущен на порту ${port}`);
+  console.log(`🤖 @atc_meter_bot`);
+});
+
+// ============================================
+// ОБРАБОТКА ОШИБОК
+// ============================================
+process.on('unhandledRejection', (error) => {
+  console.error('❌ Необработанная ошибка:', error);
 });
