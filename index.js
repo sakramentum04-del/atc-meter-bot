@@ -1,28 +1,25 @@
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 
-// Токен бота
 const token = '8867456785:AAEkO0csRdzfR5TlheLPRTEQKyquhRlGKs8';
-
-// URL Google Apps Script
 const GAS_URL = 'https://script.google.com/macros/s/AKfycby0Wr4Ydd01nQot6ZDCC7hBiLTBLUYQWZeCHPoq-1mPlm2K0wSc0HlRG3g30ARNfzsF6A/exec';
 
-// Создаём бота
 const bot = new TelegramBot(token, { polling: true });
-
-// Хранилище сессий пользователей
 const userSessions = new Map();
 
 // ============================================
-// ФУНКЦИЯ ОТПРАВКИ В GOOGLE SHEETS
+// ЖЁСТКАЯ ЗАМЕНА ТОЧКИ В GAS
 // ============================================
 async function sendToSheet(step, reading, photoUrl) {
-  
-  // 🔥 ЖЁСТКАЯ ЗАМЕНА: ЛЮБУЮ ТОЧКУ МЕНЯЕМ НА ЗАПЯТУЮ
+  // 1. Заменяем точку на запятую В САМОМ НАЧАЛЕ
   let fixedReading = String(reading).replace(/\./g, ',');
   
-  console.log(`📤 Отправляем: шаг ${step}, показания "${reading}" → "${fixedReading}"`);
+  // 2. ЕЩЁ РАЗ через replaceAll для гарантии
+  fixedReading = fixedReading.replaceAll('.', ',');
   
+  console.log(`📤 Исходное: "${reading}" → Отправляем: "${fixedReading}"`);
+  
+  // 3. Формируем JSON уже с исправленным значением
   const data = {
     step: step,
     reading: fixedReading,
@@ -37,265 +34,204 @@ async function sendToSheet(step, reading, photoUrl) {
     });
     
     const result = await response.json();
-    console.log('✅ Ответ от GAS:', JSON.stringify(result));
+    console.log('✅ Ответ GAS:', JSON.stringify(result));
     return result;
-    
   } catch (error) {
-    console.error('❌ Ошибка отправки в GAS:', error);
+    console.error('❌ Ошибка:', error);
     return { success: false, error: error.message };
   }
 }
 
 // ============================================
-// ФУНКЦИЯ ПОЛУЧЕНИЯ ДАННЫХ ИЗ GOOGLE SHEETS
-// ============================================
-async function getFromSheet(action = 'list') {
-  try {
-    const response = await fetch(`${GAS_URL}?action=${action}`);
-    const result = await response.json();
-    return result;
-  } catch (error) {
-    console.error('❌ Ошибка получения данных:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-// ============================================
-// КОМАНДА /start
+// /start
 // ============================================
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  
   await bot.sendMessage(chatId, 
-    '👋 *Привет! Я бот для учёта показаний счётчиков*\n\n' +
-    '📋 *Доступные команды:*\n' +
-    '/start - Показать это меню\n' +
-    '/list - Показать все точки маршрута\n' +
-    '/step N - Показать информацию о шаге N (1-38)\n' +
-    '/set N ПОКАЗАНИЯ - Записать показания для шага N\n\n' +
-    '📸 *Как работать:*\n' +
-    '1️⃣ Нажми "Начать обход" ниже\n' +
-    '2️⃣ Сфотографируй счётчик\n' +
-    '3️⃣ Введи показания\n\n' +
-    '💡 Можно вводить и с точкой, и с запятой — бот сам исправит!',
+    '👋 *Привет!*\n\n' +
+    '📋 Команды:\n' +
+    '/start - Меню\n' +
+    '/list - Все точки\n' +
+    '/step N - Шаг N\n' +
+    '/set N ЗНАЧЕНИЕ - Записать\n\n' +
+    '👇 Кнопка "Начать обход"',
     {
       parse_mode: 'Markdown',
       reply_markup: {
-        keyboard: [
-          ['📋 Начать обход']
-        ],
-        resize_keyboard: true,
-        one_time_keyboard: false
+        keyboard: [['📋 Начать обход']],
+        resize_keyboard: true
       }
     }
   );
 });
 
 // ============================================
-// КОМАНДА /list
+// /list
 // ============================================
 bot.onText(/\/list/, async (msg) => {
   const chatId = msg.chat.id;
-  
-  const result = await getFromSheet('list');
-  
-  if (result.success && result.data) {
-    let message = '📋 *Все точки маршрута:*\n\n';
+  try {
+    const response = await fetch(`${GAS_URL}?action=list`);
+    const result = await response.json();
     
-    result.data.forEach((row, index) => {
-      const step = index + 1;
-      const room = row[1] || 'Не указано';
-      const meter = row[2] || 'Не указан';
-      const reading = row[3] || '❌ Не записано';
-      
-      message += `*Шаг ${step}:* ${room}\n`;
-      message += `Счётчик: ${meter}\n`;
-      message += `Показания: ${reading}\n\n`;
-    });
-    
-    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-  } else {
-    await bot.sendMessage(chatId, '❌ Ошибка получения данных');
+    if (result.success && result.data) {
+      let message = '📋 *Маршрут:*\n\n';
+      result.data.forEach((row, i) => {
+        message += `*${i+1}.* ${row[1] || '?'} — ${row[3] || '❌'}\n`;
+      });
+      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    }
+  } catch (e) {
+    await bot.sendMessage(chatId, '❌ Ошибка');
   }
 });
 
 // ============================================
-// КОМАНДА /step N
+// /step N
 // ============================================
 bot.onText(/\/step (\d+)/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const stepNum = parseInt(match[1]);
+  const step = parseInt(match[1]);
   
-  if (stepNum < 1 || stepNum > 38) {
-    return bot.sendMessage(chatId, '❌ Шаг должен быть от 1 до 38');
+  if (step < 1 || step > 38) {
+    return bot.sendMessage(chatId, '❌ Шаг 1-38');
   }
   
-  const result = await getFromSheet('step_' + stepNum);
-  
-  if (result.success && result.data) {
-    const row = result.data;
-    const message = 
-      `📍 *Шаг ${stepNum}*\n\n` +
-      `🏠 Помещение: ${row[1] || 'Не указано'}\n` +
-      `🔢 № счётчика: ${row[2] || 'Не указан'}\n` +
-      `📊 Показания: ${row[3] || '❌ Не записано'}\n` +
-      `📸 Фото: ${row[4] ? '✅ Есть' : '❌ Нет'}`;
+  try {
+    const response = await fetch(`${GAS_URL}?action=step_${step}`);
+    const result = await response.json();
     
-    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-  } else {
-    await bot.sendMessage(chatId, '❌ Ошибка получения данных');
+    if (result.success && result.data) {
+      const row = result.data;
+      await bot.sendMessage(chatId,
+        `📍 *Шаг ${step}*\n` +
+        `🏠 ${row[1] || '?'}\n` +
+        `🔢 ${row[2] || '?'}\n` +
+        `📊 ${row[3] || '❌'}\n` +
+        `📸 ${row[4] ? '✅' : '❌'}`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  } catch (e) {
+    await bot.sendMessage(chatId, '❌ Ошибка');
   }
 });
 
 // ============================================
-// КОМАНДА /set N ПОКАЗАНИЯ
+// /set N ЗНАЧЕНИЕ
 // ============================================
 bot.onText(/\/set (\d+) (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const stepNum = parseInt(match[1]);
+  const step = parseInt(match[1]);
   let reading = match[2].trim();
   
-  if (stepNum < 1 || stepNum > 38) {
-    return bot.sendMessage(chatId, '❌ Шаг должен быть от 1 до 38');
+  if (step < 1 || step > 38) {
+    return bot.sendMessage(chatId, '❌ Шаг 1-38');
   }
   
-  // 🔥 АВТОМАТИЧЕСКАЯ ЗАМЕНА ТОЧКИ НА ЗАПЯТУЮ
-  reading = reading.replace(/\./g, ',');
+  // Замена точки на запятую
+  reading = reading.replace(/\./g, ',').replaceAll('.', ',');
   
-  const result = await sendToSheet(stepNum, reading, '');
+  const result = await sendToSheet(step, reading, '');
   
   if (result.success) {
-    await bot.sendMessage(chatId, `✅ Шаг ${stepNum}: показания ${reading} записаны!`);
+    await bot.sendMessage(chatId, `✅ Шаг ${step}: ${reading}`);
   } else {
-    await bot.sendMessage(chatId, '❌ Ошибка записи в таблицу');
+    await bot.sendMessage(chatId, '❌ Ошибка записи');
   }
 });
 
 // ============================================
-// ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ (не команд)
+// Обработка всех сообщений
 // ============================================
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
   
-  // Пропускаем команды
-  if (text && text.startsWith('/')) return;
+  if (!text || text.startsWith('/')) return;
   
-  // --- КНОПКА "Начать обход" ---
+  // Кнопка "Начать обход"
   if (text === '📋 Начать обход') {
-    
     userSessions.set(chatId, {
       currentStep: 1,
       lastPhotoUrl: null,
       waitingForReading: false
     });
     
-    return bot.sendMessage(chatId, 
-      '✅ *Начинаем обход!*\n\n' +
-      '📍 Шаг 1 из 38\n\n' +
-      '1️⃣ Сфотографируй счётчик\n' +
-      '2️⃣ Отправь фото\n' +
-      '3️⃣ После фото введи показания\n\n' +
-      '💡 Можно с точкой или запятой — бот сам исправит',
+    return bot.sendMessage(chatId,
+      '✅ *Обход начат!*\n\n' +
+      '📍 Шаг 1 из 38\n' +
+      '📸 Отправь фото счётчика',
       { parse_mode: 'Markdown' }
     );
   }
   
-  // Проверяем, есть ли активная сессия
+  // Проверяем сессию
   const userData = userSessions.get(chatId);
-  if (!userData || !userData.currentStep) return;
+  if (!userData || !userData.waitingForReading) return;
   
-  // Если это ввод показаний (после фото)
-  if (userData.waitingForReading) {
+  // 🔥 ЗАМЕНЯЕМ ТОЧКУ НА ЗАПЯТУЮ ПЕРЕД ОТПРАВКОЙ
+  let reading = text.replace(/\./g, ',').replaceAll('.', ',');
+  
+  const result = await sendToSheet(userData.currentStep, reading, userData.lastPhotoUrl);
+  
+  if (result.success) {
+    await bot.sendMessage(chatId, `✅ *Шаг ${userData.currentStep}:* ${reading}`, { parse_mode: 'Markdown' });
     
-    // 🔥 АВТОМАТИЧЕСКАЯ ЗАМЕНА ТОЧКИ НА ЗАПЯТУЮ
-    let reading = text.replace(/\./g, ',');
-    
-    const step = userData.currentStep;
-    
-    // Отправляем в GAS
-    const result = await sendToSheet(step, reading, userData.lastPhotoUrl);
-    
-    if (result.success) {
-      await bot.sendMessage(chatId, `✅ *Шаг ${step}:* ${reading} — записано!`, { parse_mode: 'Markdown' });
+    if (userData.currentStep < 38) {
+      userData.currentStep++;
+      userData.waitingForReading = false;
+      userData.lastPhotoUrl = null;
       
-      // Переход к следующему шагу
-      if (step < 38) {
-        userData.currentStep = step + 1;
-        userData.waitingForReading = false;
-        userData.lastPhotoUrl = null;
-        
-        return bot.sendMessage(chatId, 
-          `📍 *Шаг ${step + 1} из 38*\n\n` +
-          'Сфотографируй счётчик и отправь фото',
-          { parse_mode: 'Markdown' }
-        );
-      } else {
-        // Завершение обхода
-        userSessions.delete(chatId);
-        return bot.sendMessage(chatId, 
-          '🎉 *Обход завершён!*\n\n' +
-          'Все 38 шагов записаны.\n' +
-          'Спасибо за работу!',
-          { parse_mode: 'Markdown' }
-        );
-      }
+      await bot.sendMessage(chatId, 
+        `📍 *Шаг ${userData.currentStep} из 38*\n📸 Отправь фото`,
+        { parse_mode: 'Markdown' }
+      );
     } else {
-      return bot.sendMessage(chatId, '❌ Ошибка записи. Попробуйте ещё раз:');
+      userSessions.delete(chatId);
+      await bot.sendMessage(chatId, '🎉 *Обход завершён!*', { parse_mode: 'Markdown' });
     }
+  } else {
+    await bot.sendMessage(chatId, '❌ Ошибка, попробуй ещё:');
   }
 });
 
 // ============================================
-// ОБРАБОТКА ФОТОГРАФИЙ
+// Обработка фото
 // ============================================
 bot.on('photo', async (msg) => {
   const chatId = msg.chat.id;
   const userData = userSessions.get(chatId);
   
-  if (!userData || !userData.currentStep) {
-    return bot.sendMessage(chatId, 'Сначала нажми "📋 Начать обход"');
+  if (!userData) {
+    return bot.sendMessage(chatId, 'Нажми "📋 Начать обход"');
   }
   
-  // Получаем ID фото
   const photoId = msg.photo[msg.photo.length - 1].file_id;
-  
-  // Получаем ссылку на фото
   const fileLink = await bot.getFileLink(photoId);
   
-  // Сохраняем ссылку в сессию
   userData.lastPhotoUrl = fileLink;
   userData.waitingForReading = true;
   
   await bot.sendMessage(chatId, 
-    `✅ Фото получено!\n\n` +
-    `Теперь введи показания для шага ${userData.currentStep}\n` +
-    `💡 Можно с точкой или запятой`
+    `✅ Фото получено!\nВведи показания для шага ${userData.currentStep}`
   );
 });
 
 // ============================================
-// ЗАПУСК ВЕБ-СЕРВЕРА (для Render)
+// Веб-сервер для Render
 // ============================================
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    bot: 'atc_meter_bot',
-    version: '1.0.0'
-  });
+  res.json({ status: 'ok', bot: 'atc_meter_bot' });
 });
 
 app.listen(port, () => {
   console.log(`🚀 Бот запущен на порту ${port}`);
-  console.log(`🤖 @atc_meter_bot`);
 });
 
-// ============================================
-// ОБРАБОТКА ОШИБОК
-// ============================================
 process.on('unhandledRejection', (error) => {
-  console.error('❌ Необработанная ошибка:', error);
+  console.error('❌ Ошибка:', error);
 });
