@@ -18,8 +18,10 @@ const userSessions = new Map();
 // ============================================
 async function sendToSheet(step, reading, photoUrl) {
   
-  // Заменяем точку на запятую на всякий случай
-  let fixedReading = String(reading).replace('.', ',');
+  // 🔥 ЖЁСТКАЯ ЗАМЕНА: ЛЮБУЮ ТОЧКУ МЕНЯЕМ НА ЗАПЯТУЮ
+  let fixedReading = String(reading).replace(/\./g, ',');
+  
+  console.log(`📤 Отправляем: шаг ${step}, показания "${reading}" → "${fixedReading}"`);
   
   const data = {
     step: step,
@@ -64,7 +66,6 @@ async function getFromSheet(action = 'list') {
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   
-  // Приветственное сообщение
   await bot.sendMessage(chatId, 
     '👋 *Привет! Я бот для учёта показаний счётчиков*\n\n' +
     '📋 *Доступные команды:*\n' +
@@ -75,10 +76,8 @@ bot.onText(/\/start/, async (msg) => {
     '📸 *Как работать:*\n' +
     '1️⃣ Нажми "Начать обход" ниже\n' +
     '2️⃣ Сфотографируй счётчик\n' +
-    '3️⃣ Введи показания через запятую\n\n' +
-    '⚠️ *Важно:* Показания вводи через ЗАПЯТУЮ, а не точку!\n' +
-    '✅ Пример: 150,5\n' +
-    '❌ Неправильно: 150.5',
+    '3️⃣ Введи показания\n\n' +
+    '💡 Можно вводить и с точкой, и с запятой — бот сам исправит!',
     {
       parse_mode: 'Markdown',
       reply_markup: {
@@ -154,21 +153,14 @@ bot.onText(/\/step (\d+)/, async (msg, match) => {
 bot.onText(/\/set (\d+) (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const stepNum = parseInt(match[1]);
-  const reading = match[2].trim();
+  let reading = match[2].trim();
   
   if (stepNum < 1 || stepNum > 38) {
     return bot.sendMessage(chatId, '❌ Шаг должен быть от 1 до 38');
   }
   
-  // 🚫 ПРОВЕРКА НА ТОЧКУ
-  if (reading.includes('.')) {
-    return bot.sendMessage(chatId, 
-      '❌ *Ошибка:* Используйте ЗАПЯТУЮ, а не точку!\n\n' +
-      '✅ Пример: 150,5\n' +
-      '❌ Неправильно: 150.5',
-      { parse_mode: 'Markdown' }
-    );
-  }
+  // 🔥 АВТОМАТИЧЕСКАЯ ЗАМЕНА ТОЧКИ НА ЗАПЯТУЮ
+  reading = reading.replace(/\./g, ',');
   
   const result = await sendToSheet(stepNum, reading, '');
   
@@ -192,10 +184,10 @@ bot.on('message', async (msg) => {
   // --- КНОПКА "Начать обход" ---
   if (text === '📋 Начать обход') {
     
-    // Создаём сессию для пользователя
     userSessions.set(chatId, {
       currentStep: 1,
-      lastPhotoUrl: null
+      lastPhotoUrl: null,
+      waitingForReading: false
     });
     
     return bot.sendMessage(chatId, 
@@ -203,8 +195,8 @@ bot.on('message', async (msg) => {
       '📍 Шаг 1 из 38\n\n' +
       '1️⃣ Сфотографируй счётчик\n' +
       '2️⃣ Отправь фото\n' +
-      '3️⃣ После фото введи показания через ЗАПЯТУЮ\n\n' +
-      '⚠️ Не используй точку!',
+      '3️⃣ После фото введи показания\n\n' +
+      '💡 Можно с точкой или запятой — бот сам исправит',
       { parse_mode: 'Markdown' }
     );
   }
@@ -216,18 +208,9 @@ bot.on('message', async (msg) => {
   // Если это ввод показаний (после фото)
   if (userData.waitingForReading) {
     
-    // 🚫 ПРОВЕРКА НА ТОЧКУ
-    if (text.includes('.')) {
-      return bot.sendMessage(chatId, 
-        '❌ *Ошибка:* Введите показания через ЗАПЯТУЮ!\n\n' +
-        '✅ Пример: 150,5\n' +
-        '❌ Неправильно: 150.5\n\n' +
-        'Попробуйте ещё раз:',
-        { parse_mode: 'Markdown' }
-      );
-    }
+    // 🔥 АВТОМАТИЧЕСКАЯ ЗАМЕНА ТОЧКИ НА ЗАПЯТУЮ
+    let reading = text.replace(/\./g, ',');
     
-    const reading = text.trim();
     const step = userData.currentStep;
     
     // Отправляем в GAS
@@ -287,7 +270,7 @@ bot.on('photo', async (msg) => {
   await bot.sendMessage(chatId, 
     `✅ Фото получено!\n\n` +
     `Теперь введи показания для шага ${userData.currentStep}\n` +
-    `⚠️ Через ЗАПЯТУЮ, пример: 150,5`
+    `💡 Можно с точкой или запятой`
   );
 });
 
