@@ -1,237 +1,199 @@
-const TelegramBot = require('node-telegram-bot-api');
-const express = require('express');
+// === Google Apps Script для Telegram-бота (электрик) ===
+// Версия: 2.0 (с автоматическим созданием листов по месяцам)
 
-const token = '8867456785:AAEkO0csRdzfR5TlheLPRTEQKyquhRlGKs8';
-const GAS_URL = 'https://script.google.com/macros/s/AKfycby0Wr4Ydd01nQot6ZDCC7hBiLTBLUYQWZeCHPoq-1mPlm2K0wSc0HlRG3g30ARNfzsF6A/exec';
+const SPREADSHEET_ID = '1_-bEiCtB1WMvRv0d2sNfsrAxzCdoaI-rTjOCDpjsFBo';
+const TELEGRAM_TOKEN = '8867456785:AAEkO0csRdzfR5TlheLPRTEQKyquhRlGKs8';
+const TEMPLATE_NAME = 'Шаблон_Расчёт';
+const ROUTE_NAME = 'Маршрут';
 
-const bot = new TelegramBot(token, { polling: true });
-const userSessions = new Map();
-
-// ============================================
-// ЖЁСТКАЯ ЗАМЕНА ТОЧКИ В GAS
-// ============================================
-async function sendToSheet(step, reading, photoUrl) {
-  // 1. Заменяем точку на запятую В САМОМ НАЧАЛЕ
-  let fixedReading = String(reading).replace(/\./g, ',');
+function doGet(e) {
+  const action = e.parameter.action;
   
-  // 2. ЕЩЁ РАЗ через replaceAll для гарантии
-  fixedReading = fixedReading.replaceAll('.', ',');
-  
-  console.log(`📤 Исходное: "${reading}" → Отправляем: "${fixedReading}"`);
-  
-  // 3. Формируем JSON уже с исправленным значением
-  const data = {
-    step: step,
-    reading: fixedReading,
-    photoUrl: photoUrl || ''
-  };
-  
-  try {
-    const response = await fetch(GAS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    });
-    
-    const result = await response.json();
-    console.log('✅ Ответ GAS:', JSON.stringify(result));
-    return result;
-  } catch (error) {
-    console.error('❌ Ошибка:', error);
-    return { success: false, error: error.message };
+  if (action === 'createMonth') {
+    return createMonthSheet_();
   }
+  
+  if (action === 'getRoute') {
+    return getRoute_();
+  }
+  
+  if (action === 'savePhoto') {
+    return savePhoto_(e.parameter);
+  }
+  
+  return ContentService.createTextOutput('Неизвестное действие: ' + action);
 }
 
-// ============================================
-// /start
-// ============================================
-bot.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  await bot.sendMessage(chatId, 
-    '👋 *Привет!*\n\n' +
-    '📋 Команды:\n' +
-    '/start - Меню\n' +
-    '/list - Все точки\n' +
-    '/step N - Шаг N\n' +
-    '/set N ЗНАЧЕНИЕ - Записать\n\n' +
-    '👇 Кнопка "Начать обход"',
-    {
-      parse_mode: 'Markdown',
-      reply_markup: {
-        keyboard: [['📋 Начать обход']],
-        resize_keyboard: true
+function getRoute_() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(ROUTE_NAME);
+  const data = sheet.getDataRange().getValues();
+  
+  // Пропускаем заголовок, возвращаем [№, Помещение, № счетчика, Ссылка на фото, Строка в шаблоне]
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row[0] === '' || row[0] === 'КОНЕЦ') continue;
+    rows.push({
+      number: row[0],
+      room: row[1],
+      meter: row[2],
+      photoLink: row[6] || '',
+      sheetRow: i + 1 // строка в листе (Google Sheets индексирует с 1)
+    });
+  }
+  
+  return ContentService.createTextOutput(JSON.stringify({
+    success: true,
+    route: rows,
+    total: rows.length
+  })).setMimeType(ContentService.MimeType.JSON);
+}
+
+function createMonthSheet_() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  
+  // Определяем текущий месяц и год
+  const now = new Date();
+  const monthNames = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+  const monthName = monthNames[now.getMonth()];
+  const year = now.getFullYear();
+  const sheetName = 'Расчёт_' + monthName + '_' + year;
+  
+  // Проверяем, не создан ли уже такой лист
+  const existingSheet = ss.getSheetByName(sheetName);
+  if (existingSheet) {
+    // Если уже существует, просто очищаем колонку "Новое" (чтобы начать заново)
+    const lastRow = existingSheet.getLastRow();
+    if (lastRow > 1) {
+      existingSheet.getRange('F2:F' + lastRow).clearContent();
+    }
+    return ContentService.createTextOutput(JSON.stringify({
+      success: true,
+      sheetName: sheetName,
+      message: 'Лист уже существует. Очищены новые показания.'
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+  
+  // Копируем шаблон
+  const templateSheet = ss.getSheetByName(TEMPLATE_NAME);
+  if (!templateSheet) {
+    return ContentService.createTextOutput(JSON.stringify({
+      success: false,
+      error: 'Шаблон не найден! Убедитесь что лист "' + TEMPLATE_NAME + '" существует.'
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+  
+  const newSheet = templateSheet.copyTo(ss);
+  newSheet.setName(sheetName);
+  
+  // Перемещаем лист в начало
+  ss.setActiveSheet(newSheet);
+  ss.moveActiveSheet(1);
+  
+  // Получаем данные из "Маршрут" для заполнения колонок A, B, C
+  const routeSheet = ss.getSheetByName(ROUTE_NAME);
+  const routeData = routeSheet.getDataRange().getValues();
+  
+  // Заполняем новый лист: колонки A, B, C - из маршрута
+  let writeRow = 2; // начинаем с 2 строки (1 - заголовок)
+  
+  for (let i = 1; i < routeData.length; i++) {
+    const row = routeData[i];
+    if (row[0] === '' || row[0] === 'КОНЕЦ') continue;
+    
+    newSheet.getRange(writeRow, 1).setValue(row[0]); // №
+    newSheet.getRange(writeRow, 2).setValue(row[1]); // Помещение
+    newSheet.getRange(writeRow, 3).setValue(row[2]); // № счетчика
+    
+    // Переносим старое значение из колонки D маршрута (старые показания)
+    if (row[3] && row[3] !== '') {
+      newSheet.getRange(writeRow, 5).setValue(row[3]); // колонка E = Старое
+    }
+    
+    writeRow++;
+  }
+  
+  return ContentService.createTextOutput(JSON.stringify({
+    success: true,
+    sheetName: sheetName,
+    message: 'Лист "' + sheetName + '" создан из шаблона. Старые показания перенесены.'
+  })).setMimeType(ContentService.MimeType.JSON);
+}
+
+function savePhoto_(params) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  
+  // Определяем текущий лист расчёта
+  const now = new Date();
+  const monthNames = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+  const monthName = monthNames[now.getMonth()];
+  const year = now.getFullYear();
+  const sheetName = 'Расчёт_' + monthName + '_' + year;
+  
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    return ContentService.createTextOutput(JSON.stringify({
+      success: false,
+      error: 'Лист "' + sheetName + '" не найден. Сначала нажмите /start'
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+  
+  const rowNumber = parseInt(params.row);
+  const photoUrl = params.photoUrl;
+  const meterReading = params.meterReading;
+  
+  // Сохраняем показания в колонку F (Новое)
+  // Заменяем точку на запятую для Excel
+  let readingValue = meterReading;
+  if (readingValue && readingValue !== '') {
+    readingValue = readingValue.replace('.', ',');
+    // Преобразуем в число
+    const numValue = parseFloat(readingValue);
+    if (!isNaN(numValue)) {
+      sheet.getRange(rowNumber, 6).setValue(numValue); // колонка F = Новое
+    } else {
+      sheet.getRange(rowNumber, 6).setValue(readingValue); // если не число, пишем как текст
+    }
+  }
+  
+  // Сохраняем ссылку на фото в колонку G (или в "Маршрут")
+  if (photoUrl && photoUrl !== '') {
+    const routeSheet = ss.getSheetByName(ROUTE_NAME);
+    // Находим строку в маршруте по номеру помещения
+    const routeData = routeSheet.getDataRange().getValues();
+    for (let i = 1; i < routeData.length; i++) {
+      if (routeData[i][0] == rowNumber) {
+        routeSheet.getRange(i + 1, 7).setValue(photoUrl); // колонка G
+        break;
       }
     }
-  );
-});
-
-// ============================================
-// /list
-// ============================================
-bot.onText(/\/list/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    const response = await fetch(`${GAS_URL}?action=list`);
-    const result = await response.json();
-    
-    if (result.success && result.data) {
-      let message = '📋 *Маршрут:*\n\n';
-      result.data.forEach((row, i) => {
-        message += `*${i+1}.* ${row[1] || '?'} — ${row[3] || '❌'}\n`;
-      });
-      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    }
-  } catch (e) {
-    await bot.sendMessage(chatId, '❌ Ошибка');
-  }
-});
-
-// ============================================
-// /step N
-// ============================================
-bot.onText(/\/step (\d+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const step = parseInt(match[1]);
-  
-  if (step < 1 || step > 38) {
-    return bot.sendMessage(chatId, '❌ Шаг 1-38');
   }
   
-  try {
-    const response = await fetch(`${GAS_URL}?action=step_${step}`);
-    const result = await response.json();
-    
-    if (result.success && result.data) {
-      const row = result.data;
-      await bot.sendMessage(chatId,
-        `📍 *Шаг ${step}*\n` +
-        `🏠 ${row[1] || '?'}\n` +
-        `🔢 ${row[2] || '?'}\n` +
-        `📊 ${row[3] || '❌'}\n` +
-        `📸 ${row[4] ? '✅' : '❌'}`,
-        { parse_mode: 'Markdown' }
-      );
-    }
-  } catch (e) {
-    await bot.sendMessage(chatId, '❌ Ошибка');
-  }
-});
+  return ContentService.createTextOutput(JSON.stringify({
+    success: true,
+    message: 'Показания и фото сохранены'
+  })).setMimeType(ContentService.MimeType.JSON);
+}
 
-// ============================================
-// /set N ЗНАЧЕНИЕ
-// ============================================
-bot.onText(/\/set (\d+) (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const step = parseInt(match[1]);
-  let reading = match[2].trim();
+// Функция для проверки структуры (вызвать из редактора)
+function testStructure() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheets = ss.getSheets();
+  let result = 'Листы:\n';
+  sheets.forEach(s => result += '- ' + s.getName() + '\n');
   
-  if (step < 1 || step > 38) {
-    return bot.sendMessage(chatId, '❌ Шаг 1-38');
+  const routeSheet = ss.getSheetByName(ROUTE_NAME);
+  if (routeSheet) {
+    result += '\nМаршрут: ' + routeSheet.getLastRow() + ' строк, ' + routeSheet.getLastColumn() + ' колонок\n';
+    const headers = routeSheet.getRange(1, 1, 1, routeSheet.getLastColumn()).getValues()[0];
+    result += 'Заголовки: ' + headers.join(' | ');
   }
   
-  // Замена точки на запятую
-  reading = reading.replace(/\./g, ',').replaceAll('.', ',');
-  
-  const result = await sendToSheet(step, reading, '');
-  
-  if (result.success) {
-    await bot.sendMessage(chatId, `✅ Шаг ${step}: ${reading}`);
-  } else {
-    await bot.sendMessage(chatId, '❌ Ошибка записи');
-  }
-});
-
-// ============================================
-// Обработка всех сообщений
-// ============================================
-bot.on('message', async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
-  
-  if (!text || text.startsWith('/')) return;
-  
-  // Кнопка "Начать обход"
-  if (text === '📋 Начать обход') {
-    userSessions.set(chatId, {
-      currentStep: 1,
-      lastPhotoUrl: null,
-      waitingForReading: false
-    });
-    
-    return bot.sendMessage(chatId,
-      '✅ *Обход начат!*\n\n' +
-      '📍 Шаг 1 из 38\n' +
-      '📸 Отправь фото счётчика',
-      { parse_mode: 'Markdown' }
-    );
+  const templateSheet = ss.getSheetByName(TEMPLATE_NAME);
+  if (templateSheet) {
+    result += '\n\nШаблон: ' + templateSheet.getLastRow() + ' строк, ' + templateSheet.getLastColumn() + ' колонок';
   }
   
-  // Проверяем сессию
-  const userData = userSessions.get(chatId);
-  if (!userData || !userData.waitingForReading) return;
-  
-  // 🔥 ЗАМЕНЯЕМ ТОЧКУ НА ЗАПЯТУЮ ПЕРЕД ОТПРАВКОЙ
-  let reading = text.replace(/\./g, ',').replaceAll('.', ',');
-  
-  const result = await sendToSheet(userData.currentStep, reading, userData.lastPhotoUrl);
-  
-  if (result.success) {
-    await bot.sendMessage(chatId, `✅ *Шаг ${userData.currentStep}:* ${reading}`, { parse_mode: 'Markdown' });
-    
-    if (userData.currentStep < 38) {
-      userData.currentStep++;
-      userData.waitingForReading = false;
-      userData.lastPhotoUrl = null;
-      
-      await bot.sendMessage(chatId, 
-        `📍 *Шаг ${userData.currentStep} из 38*\n📸 Отправь фото`,
-        { parse_mode: 'Markdown' }
-      );
-    } else {
-      userSessions.delete(chatId);
-      await bot.sendMessage(chatId, '🎉 *Обход завершён!*', { parse_mode: 'Markdown' });
-    }
-  } else {
-    await bot.sendMessage(chatId, '❌ Ошибка, попробуй ещё:');
-  }
-});
-
-// ============================================
-// Обработка фото
-// ============================================
-bot.on('photo', async (msg) => {
-  const chatId = msg.chat.id;
-  const userData = userSessions.get(chatId);
-  
-  if (!userData) {
-    return bot.sendMessage(chatId, 'Нажми "📋 Начать обход"');
-  }
-  
-  const photoId = msg.photo[msg.photo.length - 1].file_id;
-  const fileLink = await bot.getFileLink(photoId);
-  
-  userData.lastPhotoUrl = fileLink;
-  userData.waitingForReading = true;
-  
-  await bot.sendMessage(chatId, 
-    `✅ Фото получено!\nВведи показания для шага ${userData.currentStep}`
-  );
-});
-
-// ============================================
-// Веб-сервер для Render
-// ============================================
-const app = express();
-const port = process.env.PORT || 3000;
-
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', bot: 'atc_meter_bot' });
-});
-
-app.listen(port, () => {
-  console.log(`🚀 Бот запущен на порту ${port}`);
-});
-
-process.on('unhandledRejection', (error) => {
-  console.error('❌ Ошибка:', error);
-});
+  return result;
+}
