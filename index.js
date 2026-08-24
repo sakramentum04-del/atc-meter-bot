@@ -3,7 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 
 const config = {
   token: '8637514542:AAHwv9cq4es0DKWAiv1ttGWDjXk8khN4Qro',
-  gasUrl: 'https://script.google.com/macros/s/AKfycbx22FpMiqpBwMJcM6aWHvXtJuRXpoR44mAZPZBiRiZq80HjLD0srzsqu0LLpftzxM-YMA/exec'
+  gasUrl: 'https://script.google.com/macros/s/AKfycbxhMN1vILI6MkBAWhV5W176wcOSAm0K7ptcF9dIit1UPHaIjJczXzRm9UWmJ-8MaYrg7A/exec'
 };
 
 const bot = new TelegramBot(config.token, { polling: true });
@@ -43,22 +43,17 @@ bot.onText(/\/id/, async (msg) => {
   await bot.sendMessage(chatId, result.text || 'chat_id: ' + chatId);
 });
 
-// === ТЕСТОВЫЙ РЕЖИМ ===
-let testMode = {};
-
+// === ТЕСТ: АВТОЗАПОЛНЕНИЕ ===
 bot.onText(/\/test/, async (msg) => {
   const chatId = msg.chat.id;
-  testMode[chatId] = true;
-  await bot.sendMessage(chatId, '🧪 ТЕСТ. Пишет в Тест_Маршрут. Рабочие листы не трогаются.\nОтправьте показания (фото с подписью).');
-  const result = await callGAS({ action: 'getStatus', testMode: true, chatId: chatId });
-  await bot.sendMessage(chatId, result.text || 'Начните тест');
+  const result = await callGAS({ action: 'autoFill', testMode: true, chatId: chatId });
+  await bot.sendMessage(chatId, result.text || 'Тест');
 });
 
 bot.onText(/\/testoff/, async (msg) => {
   const chatId = msg.chat.id;
-  testMode[chatId] = false;
   const result = await callGAS({ action: 'clearTest', testMode: true, chatId: chatId });
-  await bot.sendMessage(chatId, result.text || 'Тест завершён');
+  await bot.sendMessage(chatId, result.text || 'Тест очищен');
 });
 
 bot.on('message', async (msg) => {
@@ -66,26 +61,6 @@ bot.on('message', async (msg) => {
   if (msg.text && msg.text.startsWith('/')) return;
 
   try {
-    if (testMode[chatId]) {
-      if (msg.text && !msg.photo) {
-        await bot.sendMessage(chatId, '📸 Пришлите ФОТО и показания в подписи.');
-        return;
-      }
-      if (msg.photo) {
-        const photo = msg.photo[msg.photo.length - 1];
-        const fileUrl = await bot.getFileLink(photo.file_id);
-        const value = (msg.caption || '').trim();
-        const cleaned = value.replace(',', '.');
-        if (cleaned === '' || isNaN(parseFloat(cleaned))) {
-          await bot.sendMessage(chatId, '⚠️ Укажите показания числом в подписи. Например: "12345,6"');
-          return;
-        }
-        const result = await callGAS({ action: 'saveData', value: value, fileUrl: fileUrl, testMode: true, chatId: chatId });
-        await bot.sendMessage(chatId, result.text || 'Готово');
-      }
-      return;
-    }
-
     if (msg.text && !msg.photo) {
       await bot.sendMessage(chatId, '📸 Пришлите ФОТО счётчика и укажите показания в подписи.');
       return;
@@ -119,7 +94,7 @@ bot.onText(/\/status/, async (msg) => {
 
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, '/start — начать обход\n/next — следующий шаг\n/status — прогресс\n/id — ваш ID\n/test — тест в Тест_Маршрут\n/testoff — завершить тест');
+  bot.sendMessage(chatId, '/start — начать обход\n/next — следующий шаг\n/status — прогресс\n/id — ваш ID\n/test — автотест (заполнит Тест_Маршрут)\n/testoff — очистить тест');
 });
 
 console.log('Бот запущен...');
