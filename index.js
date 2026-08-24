@@ -5,23 +5,43 @@ const TelegramBot = require('node-telegram-bot-api');
 
 const config = {
   token: '8867456785:AAEkO0csRdzfR5TlheLPRTEQKyquhRlGKs8',
-    gasUrl: 'https://script.google.com/macros/s/AKfycbx2-UN_mEp4wDsrc31p18wSqc76PkmWaM50oxNAdR3LWZEk-W53lXP-QaFz7vX4DJ_m1Q/exec'
+  gasUrl: 'https://script.google.com/macros/s/AKfycbx2-UN_mEp4wDsrc31p18wSqc76PkmWaM50oxNAdR3LWZEk-W53lXP-QaFz7vX4DJ_m1Q/exec'
 };
+
 const bot = new TelegramBot(config.token, { polling: true });
 const userStates = {};
+
+// Вспомогательная функция для POST-запроса к GAS
+async function saveToGAS(data) {
+  const response = await fetch(config.gasUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(data)
+  });
+  return await response.json();
+}
 
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   try {
-    const response = await fetch(`${config.gasUrl}?action=createMonth`);
+    // Создаём/получаем лист месяца через init
+    const response = await fetch(`${config.gasUrl}?action=init`);
     const result = await response.json();
     if (result.success) {
-      await bot.sendMessage(chatId, `✅ Создан лист: "${result.sheetName}"\n\nНачинаем обход.\nОтправьте /next для начала.`);
-      const routeResponse = await fetch(`${config.gasUrl}?action=getRoute`);
+      await bot.sendMessage(chatId, `✅ Лист "${result.month}" готов.\n\nНачинаем обход.\nОтправьте /next для начала.`);
+      
+      // Получаем данные маршрута через list
+      const routeResponse = await fetch(`${config.gasUrl}?action=list`);
       const routeResult = await routeResponse.json();
       if (routeResult.success) {
-        userStates[chatId] = { route: routeResult.route, currentIndex: 0, currentRow: null };
-        await bot.sendMessage(chatId, `Маршрут загружен: ${routeResult.total} точек.\nНажмите /next для первой точки.`);
+        const route = routeResult.data.map((row, index) => ({
+          room: row[0] || '',
+          meter: row[1] || '',
+          address: row[2] || '',
+          sheetRow: index + 3
+        })).filter(p => p.room);
+        userStates[chatId] = { route: route, currentIndex: 0, currentRow: null };
+        await bot.sendMessage(chatId, `Маршрут загружен: ${route.length} точек.\nНажмите /next для первой точки.`);
       }
     } else {
       await bot.sendMessage(chatId, `❌ Ошибка: ${result.error || 'Неизвестная ошибка'}`);
@@ -47,13 +67,20 @@ bot.on('message', async (msg) => {
   if (msg.text && msg.text.startsWith('/')) return;
   if (!state || !state.currentRow) return bot.sendMessage(chatId, 'Сначала нажмите /start, затем /next');
   try {
+    const month = new Date().toLocaleString('ru-RU', { month: 'long' }) + ' ' + new Date().getFullYear();
+    const monthName = month.charAt(0).toUpperCase() + month.slice(1);
+    
     if (msg.photo) {
       const photo = msg.photo[msg.photo.length - 1];
       const fileLink = await bot.getFileLink(photo.file_id);
       const reading = msg.caption || '';
-      const saveUrl = `${config.gasUrl}?action=savePhoto&row=${state.currentRow.sheetRow}&photoUrl=${encodeURIComponent(fileLink)}&meterReading=${encodeURIComponent(reading)}`;
-      const response = await fetch(saveUrl);
-      const result = await response.json();
+      const data = {
+        step: state.currentRow.sheetRow - 2,
+        reading: reading,
+        photoUrl: fileLink,
+        month: monthName
+      };
+      const result = await saveToGAS(data);
       if (result.success) {
         await bot.sendMessage(chatId, `✅ Сохранено для: ${state.currentRow.room}\n📸 Фото + ${reading ? 'показания: ' + reading : ''}\n\nНажмите /next.`);
         state.currentIndex++;
@@ -64,10 +91,13 @@ bot.on('message', async (msg) => {
       return;
     }
     if (msg.text) {
-      let reading = msg.text.trim().replace('.', ',');
-      const saveUrl = `${config.gasUrl}?action=savePhoto&row=${state.currentRow.sheetRow}&meterReading=${encodeURIComponent(reading)}`;
-      const response = await fetch(saveUrl);
-      const result = await response.json();
+      const reading = msg.text.trim().replace('.', ',');
+      const data = {
+        step: state.currentRow.sheetRow - 2,
+        reading: reading,
+        month: monthName
+      };
+      const result = await saveToGAS(data);
       if (result.success) {
         await bot.sendMessage(chatId, `✅ Показания сохранены: ${reading}\nДля: ${state.currentRow.room}\n\nНажмите /next.`);
         state.currentIndex++;
