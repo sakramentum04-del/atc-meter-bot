@@ -1,6 +1,4 @@
 // === index.js для Telegram-бота (электрик) ===
-// Версия: 2.0 (с автоматическим созданием листов по месяцам)
-
 const TelegramBot = require('node-telegram-bot-api');
 
 const config = {
@@ -9,118 +7,83 @@ const config = {
 };
 
 const bot = new TelegramBot(config.token, { polling: true });
-const userStates = {};
 
-// Вспомогательная функция для POST-запроса к GAS
-async function saveToGAS(data) {
-  const response = await fetch(config.gasUrl, {
+// Отправка данных в GAS
+async function callGAS(payload) {
+  const res = await fetch(config.gasUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(data)
+    body: JSON.stringify(payload)
   });
-  return await response.json();
+  return await res.json();
 }
 
+// /start — просим текущий шаг
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   try {
-    // Создаём/получаем лист месяца через init
-    const response = await fetch(`${config.gasUrl}?action=init`);
-    const result = await response.json();
-    if (result.success) {
-      await bot.sendMessage(chatId, `✅ Лист "${result.month}" готов.\n\nНачинаем обход.\nОтправьте /next для начала.`);
-      
-      // Получаем данные маршрута через list
-      const routeResponse = await fetch(`${config.gasUrl}?action=list`);
-      const routeResult = await routeResponse.json();
-      if (routeResult.success) {
-        const route = routeResult.data.map((row, index) => ({
-          room: row[0] || '',
-          meter: row[1] || '',
-          address: row[2] || '',
-          sheetRow: index + 3
-        })).filter(p => p.room);
-        userStates[chatId] = { route: route, currentIndex: 0, currentRow: null };
-        await bot.sendMessage(chatId, `Маршрут загружен: ${route.length} точек.\nНажмите /next для первой точки.`);
-      }
-    } else {
-      await bot.sendMessage(chatId, `❌ Ошибка: ${result.error || 'Неизвестная ошибка'}`);
-    }
-  } catch (error) {
-    await bot.sendMessage(chatId, `❌ Ошибка соединения: ${error.message}`);
+    const result = await callGAS({ action: 'getStatus' });
+    await bot.sendMessage(chatId, result.text || 'Начните обход');
+  } catch (err) {
+    await bot.sendMessage(chatId, '❌ Ошибка: ' + err.message);
   }
 });
 
+// /next — тоже текущий шаг
 bot.onText(/\/next/, async (msg) => {
   const chatId = msg.chat.id;
-  const state = userStates[chatId];
-  if (!state || !state.route) return bot.sendMessage(chatId, 'Сначала нажмите /start');
-  if (state.currentIndex >= state.route.length) return bot.sendMessage(chatId, '🎉 Обход завершён!');
-  const point = state.route[state.currentIndex];
-  state.currentRow = point;
-  await bot.sendMessage(chatId, `📍 Точка ${state.currentIndex + 1}/${state.route.length}\n\n🏢 ${point.room}\n🔢 № счётчика: ${point.meter}\n\nОтправьте показания или фото.`);
-});
-
-bot.on('message', async (msg) => {
-  const chatId = msg.chat.id;
-  const state = userStates[chatId];
-  if (msg.text && msg.text.startsWith('/')) return;
-  if (!state || !state.currentRow) return bot.sendMessage(chatId, 'Сначала нажмите /start, затем /next');
   try {
-    const month = new Date().toLocaleString('ru-RU', { month: 'long' }) + ' ' + new Date().getFullYear();
-    const monthName = month.charAt(0).toUpperCase() + month.slice(1);
-    
-    if (msg.photo) {
-      const photo = msg.photo[msg.photo.length - 1];
-      const fileLink = await bot.getFileLink(photo.file_id);
-      const reading = msg.caption || '';
-      const data = {
-        step: state.currentRow.sheetRow - 2,
-        reading: reading,
-        photoUrl: fileLink,
-        month: monthName
-      };
-      const result = await saveToGAS(data);
-      if (result.success) {
-        await bot.sendMessage(chatId, `✅ Сохранено для: ${state.currentRow.room}\n📸 Фото + ${reading ? 'показания: ' + reading : ''}\n\nНажмите /next.`);
-        state.currentIndex++;
-        state.currentRow = null;
-      } else {
-        await bot.sendMessage(chatId, `❌ Ошибка: ${result.error}`);
-      }
-      return;
-    }
-    if (msg.text) {
-      const reading = msg.text.trim().replace('.', ',');
-      const data = {
-        step: state.currentRow.sheetRow - 2,
-        reading: reading,
-        month: monthName
-      };
-      const result = await saveToGAS(data);
-      if (result.success) {
-        await bot.sendMessage(chatId, `✅ Показания сохранены: ${reading}\nДля: ${state.currentRow.room}\n\nНажмите /next.`);
-        state.currentIndex++;
-        state.currentRow = null;
-      } else {
-        await bot.sendMessage(chatId, `❌ Ошибка: ${result.error}`);
-      }
-    }
-  } catch (error) {
-    await bot.sendMessage(chatId, `❌ Ошибка: ${error.message}`);
+    const result = await callGAS({ action: 'getStatus' });
+    await bot.sendMessage(chatId, result.text || 'Начните обход');
+  } catch (err) {
+    await bot.sendMessage(chatId, '❌ Ошибка: ' + err.message);
   }
 });
 
+// Приём показаний и фото
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  if (msg.text && msg.text.startsWith('/')) return;
+
+  try {
+    let value = '';
+    let fileUrl = '';
+
+    if (msg.photo) {
+      const photo = msg.photo[msg.photo.length - 1];
+      fileUrl = await bot.getFileLink(photo.file_id);
+      value = (msg.caption || '').trim();
+    } else if (msg.text) {
+      value = msg.text.trim();
+    }
+
+    const cleaned = value.replace(',', '.');
+    if (cleaned !== '' && isNaN(parseFloat(cleaned))) {
+      await bot.sendMessage(chatId, '❌ Показания должны быть числом.\n\nНапример: 12345,6');
+      return;
+    }
+
+    const result = await callGAS({ action: 'saveData', value: value, fileUrl: fileUrl });
+    await bot.sendMessage(chatId, result.text || 'Готово');
+  } catch (err) {
+    await bot.sendMessage(chatId, '❌ Ошибка: ' + err.message);
+  }
+});
+
+// /status
 bot.onText(/\/status/, async (msg) => {
   const chatId = msg.chat.id;
-  const state = userStates[chatId];
-  if (!state) return bot.sendMessage(chatId, 'Нет активного обхода. Нажмите /start');
-  await bot.sendMessage(chatId, `📊 Статус:\n✅ Собрано: ${state.currentIndex}/${state.route.length}\n📈 Прогресс: ${Math.round(state.currentIndex/state.route.length*100)}%`);
+  try {
+    const result = await callGAS({ action: 'getStatus' });
+    await bot.sendMessage(chatId, result.text || 'Начните обход');
+  } catch (err) {
+    await bot.sendMessage(chatId, '❌ Ошибка: ' + err.message);
+  }
 });
 
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, `/start — начать обход\n/next — следующая точка\n/status — прогресс\n/help — справка`);
+  bot.sendMessage(chatId, '/start — начать обход\n/next — следующий шаг\n/status — прогресс\n/help — справка');
 });
 
 console.log('Бот запущен...');
