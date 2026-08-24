@@ -3,7 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 
 const config = {
   token: '8637514542:AAHwv9cq4es0DKWAiv1ttGWDjXk8khN4Qro',
-  gasUrl: 'https://script.google.com/macros/s/AKfycbwOfqftMs3fuAcIYtwVV99sTDf_tC4OjE3L82R4S4C1gr554ygGPG6ThVK9a3Tea6Kp/exec'
+  gasUrl: 'https://script.google.com/macros/s/AKfycbx22FpMiqpBwMJcM6aWHvXtJuRXpoR44mAZPZBiRiZq80HjLD0srzsqu0LLpftzxM-YMA/exec'
 };
 
 const bot = new TelegramBot(config.token, { polling: true });
@@ -49,7 +49,7 @@ let testMode = {};
 bot.onText(/\/test/, async (msg) => {
   const chatId = msg.chat.id;
   testMode[chatId] = true;
-  await bot.sendMessage(chatId, '🧪 ТЕСТ. Пишет в Тест_Маршрут. Ничего в рабочие листы не идёт.\nОтправьте показания (фото с подписью).');
+  await bot.sendMessage(chatId, '🧪 ТЕСТ. Пишет в Тест_Маршрут. Рабочие листы не трогаются.\nОтправьте показания (фото с подписью).');
   const result = await callGAS({ action: 'getStatus', testMode: true, chatId: chatId });
   await bot.sendMessage(chatId, result.text || 'Начните тест');
 });
@@ -66,7 +66,6 @@ bot.on('message', async (msg) => {
   if (msg.text && msg.text.startsWith('/')) return;
 
   try {
-    // ТЕСТОВЫЙ режим
     if (testMode[chatId]) {
       if (msg.text && !msg.photo) {
         await bot.sendMessage(chatId, '📸 Пришлите ФОТО и показания в подписи.');
@@ -87,7 +86,6 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    // ОБЫЧНЫЙ режим
     if (msg.text && !msg.photo) {
       await bot.sendMessage(chatId, '📸 Пришлите ФОТО счётчика и укажите показания в подписи.');
       return;
