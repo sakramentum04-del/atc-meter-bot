@@ -3,7 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 
 const config = {
   token: '8637514542:AAHwv9cq4es0DKWAiv1ttGWDjXk8khN4Qro',
-  gasUrl: 'https://script.google.com/macros/s/AKfycbwffSEtAOzcQD8qTCtn-oqzcfDadRrrW9J3XEnoWuVLo6JSSoBb0Zfc0F8kjyllbyg5uA/exec'
+  gasUrl: 'https://script.google.com/macros/s/AKfycbxOsk_oPob0FtqL2O2QWRTpWwUoIK8ENezOYgnCB_5BGejnB8l2nFwLmOnGg7OlqduUpQ/exec'
 };
 
 const bot = new TelegramBot(config.token, { polling: true, onlyFirstMatch: true });
