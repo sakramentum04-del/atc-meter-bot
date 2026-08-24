@@ -43,10 +43,51 @@ bot.onText(/\/id/, async (msg) => {
   await bot.sendMessage(chatId, result.text || 'chat_id: ' + chatId);
 });
 
+// === ТЕСТОВЫЙ РЕЖИМ ===
+let testMode = {};
+
+bot.onText(/\/test/, async (msg) => {
+  const chatId = msg.chat.id;
+  testMode[chatId] = true;
+  await bot.sendMessage(chatId, '🧪 ТЕСТ. Пишет в Тест_Маршрут. Ничего в рабочие листы не идёт.\nОтправьте показания (фото с подписью).');
+  const result = await callGAS({ action: 'getStatus', testMode: true, chatId: chatId });
+  await bot.sendMessage(chatId, result.text || 'Начните тест');
+});
+
+bot.onText(/\/testoff/, async (msg) => {
+  const chatId = msg.chat.id;
+  testMode[chatId] = false;
+  const result = await callGAS({ action: 'clearTest', testMode: true, chatId: chatId });
+  await bot.sendMessage(chatId, result.text || 'Тест завершён');
+});
+
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   if (msg.text && msg.text.startsWith('/')) return;
+
   try {
+    // ТЕСТОВЫЙ режим
+    if (testMode[chatId]) {
+      if (msg.text && !msg.photo) {
+        await bot.sendMessage(chatId, '📸 Пришлите ФОТО и показания в подписи.');
+        return;
+      }
+      if (msg.photo) {
+        const photo = msg.photo[msg.photo.length - 1];
+        const fileUrl = await bot.getFileLink(photo.file_id);
+        const value = (msg.caption || '').trim();
+        const cleaned = value.replace(',', '.');
+        if (cleaned === '' || isNaN(parseFloat(cleaned))) {
+          await bot.sendMessage(chatId, '⚠️ Укажите показания числом в подписи. Например: "12345,6"');
+          return;
+        }
+        const result = await callGAS({ action: 'saveData', value: value, fileUrl: fileUrl, testMode: true, chatId: chatId });
+        await bot.sendMessage(chatId, result.text || 'Готово');
+      }
+      return;
+    }
+
+    // ОБЫЧНЫЙ режим
     if (msg.text && !msg.photo) {
       await bot.sendMessage(chatId, '📸 Пришлите ФОТО счётчика и укажите показания в подписи.');
       return;
@@ -57,7 +98,7 @@ bot.on('message', async (msg) => {
       const value = (msg.caption || '').trim();
       const cleaned = value.replace(',', '.');
       if (cleaned === '' || isNaN(parseFloat(cleaned))) {
-        await bot.sendMessage(chatId, '⚠️ В подписи к фото укажите показания числом. Например: "12345,6"');
+        await bot.sendMessage(chatId, '⚠️ Укажите показания числом в подписи. Например: "12345,6"');
         return;
       }
       const result = await callGAS({ action: 'saveData', value: value, fileUrl: fileUrl, chatId: chatId });
@@ -80,7 +121,7 @@ bot.onText(/\/status/, async (msg) => {
 
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, '/start — начать обход\n/next — следующий шаг\n/status — прогресс\n/id — ваш ID\n/help — справка');
+  bot.sendMessage(chatId, '/start — начать обход\n/next — следующий шаг\n/status — прогресс\n/id — ваш ID\n/test — тест в Тест_Маршрут\n/testoff — завершить тест');
 });
 
 console.log('Бот запущен...');
